@@ -264,7 +264,7 @@ mod language_per_session {
         lang: Option<&str>,
         voice: Option<&str>,
         text: &str,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, (u32, String)> {
         let (req_tx, mut req_rx) = mpsc::channel(REQUEST_QUEUE);
         let (reply_tx, mut reply_rx) = mpsc::channel(256);
         let (_cancel_tx, mut cancel_rx) = watch::channel(false);
@@ -292,7 +292,7 @@ mod language_per_session {
                     use base64::Engine;
                     pcm.extend(base64::engine::general_purpose::STANDARD.decode(audio).unwrap());
                 }
-                TtsReply::Error { message, .. } => return Err(message),
+                TtsReply::Error { message, code } => return Err((code, message)),
                 _ => {}
             }
         }
@@ -317,7 +317,7 @@ mod language_per_session {
         out
     }
 
-    /// One instance, one set of weights, two connections in different languages.
+    /// One instance, one set of weights, two simultaneous connections in different languages.
     #[tokio::test]
     #[ignore = "requires PTTS_TEST_MODEL: a multilingual checkpoint folder or hf:// repo"]
     async fn one_instance_serves_two_languages() {
@@ -345,15 +345,21 @@ mod language_per_session {
             ("pt2", "pt", "We have $10.50 and Dr. Smith, on March 2nd at 3pm."),
             ("en2", "en", "Temos R$ 10,50 e a Dra. Ana, em 2 de março, às 15h."),
         ];
-        for (name, lang, text) in cases {
-            let pcm = setup_and_speak(&app, Some(lang), text).await;
-            assert!(!pcm.is_empty(), "{name}");
-            // Not silence.
-            assert!(pcm.as_chunks::<2>().0.iter().any(|b| i16::from_le_bytes(*b).abs() > 300));
-            if let Ok(dir) = std::env::var("PTTS_TEST_WAV_DIR") {
-                std::fs::create_dir_all(&dir).unwrap();
-                let file = format!("{dir}/{name}-{lang}.wav");
-                std::fs::write(file, wav(&pcm, app.sample_rate)).unwrap();
+        // Two connections at once, as the instance serves them: each pair runs concurrently.
+        for pair in cases.chunks(2) {
+            let app = &app;
+            let runs = pair.iter().map(|&(name, lang, text)| async move {
+                (name, lang, setup_and_speak(app, Some(lang), text).await)
+            });
+            for (name, lang, pcm) in futures_util::future::join_all(runs).await {
+                assert!(!pcm.is_empty(), "{name}");
+                // Not silence.
+                assert!(pcm.as_chunks::<2>().0.iter().any(|b| i16::from_le_bytes(*b).abs() > 300));
+                if let Ok(dir) = std::env::var("PTTS_TEST_WAV_DIR") {
+                    std::fs::create_dir_all(&dir).unwrap();
+                    let file = format!("{dir}/{name}-{lang}.wav");
+                    std::fs::write(file, wav(&pcm, app.sample_rate)).unwrap();
+                }
             }
         }
     }
@@ -398,7 +404,10 @@ mod language_per_session {
                     .unwrap();
             }
         }
-        let refused = speak_as(&app, Some("en"), Some("Débora"), en).await.unwrap_err();
-        assert!(refused.contains("unknown voice"), "{refused}");
+        let (code, message) = speak_as(&app, Some("en"), Some("Débora"), en).await.unwrap_err();
+        assert_eq!(code, error_codes::VOICE_LANGUAGE_MISMATCH, "{message}");
+        assert!(message.contains("does not speak"), "{message}");
+        let (code, _) = speak_as(&app, Some("en"), Some("NoSuchVoice"), en).await.unwrap_err();
+        assert_eq!(code, error_codes::NOT_FOUND);
     }
 }

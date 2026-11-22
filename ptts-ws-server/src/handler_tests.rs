@@ -197,3 +197,129 @@ async fn closing_a_full_request_queue_releases_the_reader() {
     tokio::time::timeout(Duration::from_secs(2), reader).await.unwrap().unwrap();
     assert!(*cancel_rx.borrow());
 }
+
+mod language_per_session {
+    use super::*;
+    use crate::model::load_ptts;
+    use ptts::preprocess::Lang;
+    use std::collections::HashMap;
+
+    #[test]
+    fn the_session_language_wins_over_the_server_default() {
+        let en = Some(Normalize::for_lang(Lang::En));
+        let pt = session_normalize(Some("pt"), en, Rules::DEFAULT).unwrap();
+        assert_eq!(pt.as_str(), "pt");
+        assert_eq!(session_normalize(None, en, Rules::DEFAULT).unwrap().as_str(), "en");
+        assert_eq!(session_normalize(Some(""), en, Rules::DEFAULT).unwrap().as_str(), "en");
+        assert_eq!(session_normalize(Some("none"), en, Rules::DEFAULT).unwrap().as_str(), "none");
+    }
+
+    #[test]
+    fn no_language_anywhere_is_an_error_that_says_what_to_send() {
+        let message = session_normalize(None, None, Rules::DEFAULT).unwrap_err();
+        assert!(message.contains("lang") && message.contains("--lang"), "{message}");
+        assert!(session_normalize(Some("xx"), None, Rules::DEFAULT).is_err());
+    }
+
+    #[test]
+    fn a_voice_must_belong_to_the_language_or_declare_none() {
+        let langs = HashMap::from([("Zoey".to_string(), "en".to_string())]);
+        let (en, pt) = (Normalize::for_lang(Lang::En), Normalize::for_lang(Lang::Pt));
+        assert!(voice_fits_lang(&langs, "Zoey", en));
+        assert!(!voice_fits_lang(&langs, "Zoey", pt));
+        assert!(voice_fits_lang(&langs, "Zoey", Normalize::OFF));
+        assert!(voice_fits_lang(&langs, "default", pt), "no declared language fits all");
+    }
+
+    async fn setup_and_speak(app: &AppState, lang: Option<&str>, text: &str) -> Vec<u8> {
+        let (req_tx, mut req_rx) = mpsc::channel(REQUEST_QUEUE);
+        let (reply_tx, mut reply_rx) = mpsc::channel(256);
+        let (_cancel_tx, mut cancel_rx) = watch::channel(false);
+        let lang = lang.map_or("null".to_string(), |l| format!("\"{l}\""));
+        let msgs = [
+            format!(r#"{{"type":"setup","output_format":"pcm","lang":{lang}}}"#),
+            serde_json::json!({"type": "text", "text": text}).to_string(),
+            r#"{"type":"end_of_stream"}"#.to_string(),
+        ];
+        for m in msgs {
+            req_tx.send(Message::Text(m.into())).await.unwrap();
+        }
+        drop(req_tx);
+        let app = app.clone();
+        let run =
+            tokio::spawn(
+                async move { run_session(app, &mut req_rx, &reply_tx, &mut cancel_rx).await },
+            );
+        let mut pcm = Vec::new();
+        while let Some(reply) = reply_rx.recv().await {
+            match reply {
+                TtsReply::Audio { audio, .. } => {
+                    use base64::Engine;
+                    pcm.extend(base64::engine::general_purpose::STANDARD.decode(audio).unwrap());
+                }
+                TtsReply::Error { message, .. } => panic!("{message}"),
+                _ => {}
+            }
+        }
+        run.await.unwrap().unwrap();
+        pcm
+    }
+
+    /// Mono s16le at `rate` as a WAV file.
+    fn wav(pcm: &[u8], rate: u32) -> Vec<u8> {
+        let mut out = Vec::with_capacity(44 + pcm.len());
+        out.extend(b"RIFF");
+        out.extend((36 + pcm.len() as u32).to_le_bytes());
+        out.extend(b"WAVEfmt ");
+        out.extend(16u32.to_le_bytes());
+        out.extend([1, 0, 1, 0]);
+        out.extend(rate.to_le_bytes());
+        out.extend((rate * 2).to_le_bytes());
+        out.extend([2, 0, 16, 0]);
+        out.extend(b"data");
+        out.extend((pcm.len() as u32).to_le_bytes());
+        out.extend(pcm);
+        out
+    }
+
+    /// One instance, one set of weights, two connections in different languages.
+    #[tokio::test]
+    #[ignore = "requires PTTS_TEST_MODEL: a multilingual checkpoint folder or hf:// repo"]
+    async fn one_instance_serves_two_languages() {
+        let model = std::env::var("PTTS_TEST_MODEL").expect("set PTTS_TEST_MODEL");
+        let app = load_ptts(
+            &model,
+            None,
+            None,
+            ptts::synth::DeviceKind::Cpu,
+            ptts::synth::Quant::Q80,
+            0.3,
+            7,
+            1024,
+            None,
+            Rules::DEFAULT,
+            true,
+            &[],
+            std::num::NonZeroUsize::new(2).unwrap(),
+        )
+        .await
+        .unwrap();
+        let cases = [
+            ("pt1", "pt", "Temos R$ 10,50 e a Dra. Ana, em 2 de março, às 15h."),
+            ("en1", "en", "We have $10.50 and Dr. Smith, on March 2nd at 3pm."),
+            ("pt2", "pt", "We have $10.50 and Dr. Smith, on March 2nd at 3pm."),
+            ("en2", "en", "Temos R$ 10,50 e a Dra. Ana, em 2 de março, às 15h."),
+        ];
+        for (name, lang, text) in cases {
+            let pcm = setup_and_speak(&app, Some(lang), text).await;
+            assert!(!pcm.is_empty(), "{name}");
+            // Not silence.
+            assert!(pcm.as_chunks::<2>().0.iter().any(|b| i16::from_le_bytes(*b).abs() > 300));
+            if let Ok(dir) = std::env::var("PTTS_TEST_WAV_DIR") {
+                std::fs::create_dir_all(&dir).unwrap();
+                let file = format!("{dir}/{name}-{lang}.wav");
+                std::fs::write(file, wav(&pcm, app.sample_rate)).unwrap();
+            }
+        }
+    }
+}

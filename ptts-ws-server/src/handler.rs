@@ -4,6 +4,7 @@ use crate::protocol::{TtsReply, TtsRequest, error_codes};
 use anyhow::Result;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use ptts::preprocess::{Normalize, Rules};
 use ptts::synth::{Session, SpeechOptions};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
@@ -187,13 +188,15 @@ async fn run_session(
         match (&mut sess, req) {
             (
                 SessionState::Awaiting,
-                TtsRequest::Setup { output_format, voice, voice_id, voice_emb, .. },
-            ) => match handle_setup(&app, output_format, voice, voice_id, voice_emb, reply_tx)
-                .await?
-            {
-                Some(new_state) => sess = new_state,
-                None => continue,
-            },
+                TtsRequest::Setup { output_format, voice, voice_id, voice_emb, lang, .. },
+            ) => {
+                match handle_setup(&app, output_format, voice, voice_id, voice_emb, lang, reply_tx)
+                    .await?
+                {
+                    Some(new_state) => sess = new_state,
+                    None => continue,
+                }
+            }
             (SessionState::Awaiting, _) => {
                 send_error(
                     reply_tx,
@@ -275,12 +278,41 @@ async fn flush_buffer(
     Ok(())
 }
 
+/// The normalization a session runs with: its own `lang`, else the server's. Neither is an
+/// error, since guessing a language reads worse than refusing.
+fn session_normalize(
+    requested: Option<&str>,
+    default: Option<Normalize>,
+    rules: Rules,
+) -> std::result::Result<Normalize, String> {
+    match requested.filter(|l| !l.is_empty()) {
+        Some(lang) => {
+            lang.parse::<Normalize>().map(|n| n.with_rules(rules)).map_err(|e| e.to_string())
+        }
+        None => default.ok_or_else(|| {
+            "no language: send `lang` in setup, or start the server with --lang".to_string()
+        }),
+    }
+}
+
+/// Whether `voice` can speak `normalize`'s language. Voices with no declared language, such as
+/// the checkpoint's own and `--voice-dir` ones, fit every language, as does `none`.
+fn voice_fits_lang(
+    voice_langs: &std::collections::HashMap<String, String>,
+    voice: &str,
+    normalize: Normalize,
+) -> bool {
+    normalize.as_str() == "none"
+        || voice_langs.get(voice).is_none_or(|language| language == normalize.as_str())
+}
+
 async fn handle_setup(
     app: &AppState,
     output_format: String,
     voice: Option<String>,
     voice_id: Option<String>,
     voice_emb: Option<String>,
+    lang: Option<String>,
     reply_tx: &mpsc::Sender<TtsReply>,
 ) -> Result<Option<SessionState>> {
     if voice_emb.as_deref().is_some_and(|s| !s.is_empty()) {
@@ -292,6 +324,13 @@ async fn handle_setup(
         .await?;
         return Ok(None);
     }
+    let normalize = match session_normalize(lang.as_deref(), app.default_lang, app.rules) {
+        Ok(n) => n,
+        Err(message) => {
+            send_error(reply_tx, error_codes::BAD_REQUEST, message).await?;
+            return Ok(None);
+        }
+    };
     let format = match output_format.parse::<Format>() {
         Ok(f) => f,
         Err(e) => {
@@ -318,9 +357,15 @@ async fn handle_setup(
         .unwrap_or(&app.default_voice);
     let voice_name =
         if voice_name == "default" { &app.default_voice } else { voice_name }.to_string();
-    if !app.voices.contains(&voice_name) {
-        send_error(reply_tx, error_codes::NOT_FOUND, format!("unknown voice '{voice_name}'"))
-            .await?;
+    if !app.voices.contains(&voice_name)
+        || !voice_fits_lang(&app.voice_langs, &voice_name, normalize)
+    {
+        send_error(
+            reply_tx,
+            error_codes::NOT_FOUND,
+            format!("unknown voice '{voice_name}' for language '{}'", normalize.as_str()),
+        )
+        .await?;
         return Ok(None);
     }
     tracing::info!(?voice_name, "starting new TTS session");
@@ -331,6 +376,7 @@ async fn handle_setup(
     // request that fits in one chunk should be spoken as one.
     let opts = SpeechOptions::default()
         .voice(voice_name.clone())
+        .normalize(normalize)
         .max_tokens_per_chunk(ptts::plan::MAX_FIT_TOKENS);
     let session = match app.synth.session(&opts, app.max_seq_len) {
         Ok(session) => session,
@@ -488,7 +534,9 @@ mod tests {
             0.3,
             7,
             1024,
-            "en".parse().unwrap(),
+            Some("en".parse().unwrap()),
+            ptts::preprocess::Rules::DEFAULT,
+            false,
             &[],
             std::num::NonZeroUsize::new(1).unwrap(),
         )

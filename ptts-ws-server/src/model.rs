@@ -7,9 +7,10 @@
 use anyhow::{Context as _, Result};
 use ptts::checkpoint::{Checkpoint, ResolveOptions};
 use ptts::hub::HubSource;
-use ptts::preprocess::Normalize;
+use ptts::preprocess::{Normalize, Rules};
 use ptts::synth::{DeviceKind, Quant, Synth};
 use ptts::voice_catalog::{DEFAULT_VOICE_CATALOG, VoiceCatalog};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// The loaded model and the request defaults, shared by every connection.
@@ -23,6 +24,11 @@ pub struct Inner {
     pub model_name: String,
     pub voices: Vec<String>,
     pub default_voice: String,
+    /// Language of each catalog voice that declares one; the others fit every language.
+    pub voice_langs: HashMap<String, String>,
+    /// What a session that sends no `lang` is normalized as; `None` makes `lang` mandatory.
+    pub default_lang: Option<Normalize>,
+    pub rules: Rules,
     pub max_seq_len: usize,
     pub seed_base: u64,
     pub sample_rate: u32,
@@ -60,10 +66,12 @@ async fn locate(model: &str, quant: Quant) -> Result<(Checkpoint, String)> {
     Ok((checkpoint, name))
 }
 
+type CatalogVoice = (String, std::path::PathBuf, Option<String>);
+
 /// The voices of the catalog `source` names, each downloaded on first use: those in `lang` and
 /// those with no language, or all of them when `lang` is `none`. A voice that cannot be fetched
-/// is logged and skipped.
-async fn catalog_voices(source: &str, lang: &str) -> Result<Vec<(String, std::path::PathBuf)>> {
+/// is logged and skipped. Each comes with the language the catalog gives it, if any.
+async fn catalog_voices(source: &str, lang: &str) -> Result<Vec<CatalogVoice>> {
     let (source, lang) = (source.to_string(), lang.to_string());
     // The blocking Hub client runs its own runtime, which cannot be started inside this one.
     tokio::task::spawn_blocking(move || {
@@ -74,7 +82,7 @@ async fn catalog_voices(source: &str, lang: &str) -> Result<Vec<(String, std::pa
                 continue;
             }
             match catalog.fetch(voice) {
-                Ok(path) => voices.push((voice.name.clone(), path)),
+                Ok(path) => voices.push((voice.name.clone(), path, voice.language.clone())),
                 Err(e) => {
                     tracing::warn!(voice = %voice.name, error = %e, "failed to fetch catalog voice")
                 }
@@ -96,7 +104,9 @@ pub async fn load_ptts(
     temperature: f32,
     seed_base: u64,
     max_seq_len: usize,
-    normalize: Normalize,
+    normalize: Option<Normalize>,
+    rules: Rules,
+    all_languages: bool,
     conditions: &[(String, String)],
     max_concurrent_requests: std::num::NonZeroUsize,
 ) -> Result<AppState> {
@@ -106,7 +116,15 @@ pub async fn load_ptts(
         tokio::sync::Semaphore::MAX_PERMITS
     );
     quant.check_device(device)?;
+    let default_lang = normalize.map(|n| n.with_rules(rules));
+    let synth_normalize = default_lang.unwrap_or(Normalize::OFF);
+    // Which catalog voices to register: all of them when sessions choose their language.
+    let catalog_lang = match default_lang {
+        Some(n) if !all_languages => n.as_str(),
+        _ => "none",
+    };
     let (m, model_name) = locate(model, quant).await?;
+    let mut voice_langs = HashMap::new();
     let mut extra_voices = if let Some(voice_dir) = voice_dir {
         let found = ptts::loader::voices_in(voice_dir);
         if found.is_empty() {
@@ -117,8 +135,15 @@ pub async fn load_ptts(
         Vec::new()
     };
     if let Some(catalog) = voice_catalog {
-        match catalog_voices(catalog, normalize.as_str()).await {
-            Ok(voices) => extra_voices.extend(voices),
+        match catalog_voices(catalog, catalog_lang).await {
+            Ok(voices) => {
+                for (name, path, language) in voices {
+                    if let Some(language) = language {
+                        voice_langs.insert(name.clone(), language);
+                    }
+                    extra_voices.push((name, path));
+                }
+            }
             // Offline, a server that needs no catalog voice still starts.
             Err(e) if catalog == DEFAULT_VOICE_CATALOG => {
                 tracing::warn!(error = %e, "the default voice catalog could not be read")
@@ -127,7 +152,8 @@ pub async fn load_ptts(
         }
     }
     let frame_rate = m.config.mimi.frame_rate;
-    let mut builder = m.builder(normalize).device(device).quant(quant).temperature(temperature);
+    let mut builder =
+        m.builder(synth_normalize).device(device).quant(quant).temperature(temperature);
     for (name, value) in conditions {
         builder = builder.condition(name, value);
     }
@@ -149,7 +175,7 @@ pub async fn load_ptts(
         weights = %synth.quant().as_str(),
         num_voices = voices.len(),
         %default_voice,
-        lang = normalize.as_str(),
+        lang = default_lang.map_or("unset", |n| n.as_str()),
         "model loaded"
     );
 
@@ -159,6 +185,9 @@ pub async fn load_ptts(
         model_name,
         voices,
         default_voice,
+        voice_langs,
+        default_lang,
+        rules,
         max_seq_len,
         seed_base,
         sample_rate,
@@ -183,15 +212,16 @@ mod tests {
         )
         .unwrap();
         let source = dir.to_str().unwrap();
-        let names = |voices: Vec<(String, std::path::PathBuf)>| -> Vec<String> {
-            voices.into_iter().map(|(name, _)| name).collect()
+        let names = |voices: Vec<CatalogVoice>| -> Vec<String> {
+            voices.into_iter().map(|(name, ..)| name).collect()
         };
         assert_eq!(names(catalog_voices(source, "en").await.unwrap()), ["Zoey", "Mine"]);
         assert_eq!(
             names(catalog_voices(source, "none").await.unwrap()),
             ["Zoey", "Annika", "Mine"]
         );
-        let (_, path) = catalog_voices(source, "de").await.unwrap().remove(0);
+        let (_, path, language) = catalog_voices(source, "de").await.unwrap().remove(0);
+        assert_eq!(language.as_deref(), Some("de"));
         assert_eq!(path, dir.join("voices/b.safetensors"));
         assert!(catalog_voices(dir.join("missing").to_str().unwrap(), "en").await.is_err());
     }
@@ -226,7 +256,9 @@ mod checkpoint_tests {
             0.3,
             7,
             1024,
-            Normalize::OFF,
+            Some(Normalize::OFF),
+            Rules::DEFAULT,
+            false,
             &[],
             std::num::NonZeroUsize::new(1).unwrap(),
         )

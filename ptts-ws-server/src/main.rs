@@ -64,16 +64,16 @@ struct Args {
     quant: Option<String>,
 
     /// Language incoming text is normalized as before tokenizing: `en`, `fr`, `de`, `es`, `pt`,
-    /// `ar`, `hi`, `ko`, `pl`, `sv`, `fi`, `no`, `it`, `nl` or `ja`. Required:
-    /// the spoken forms differ per language, so there is nothing safe to guess.
+    /// `ar`, `hi`, `ko`, `pl`, `sv`, `fi`, `no`, `it`, `nl` or `ja`. Required
+    /// without `--multilang`: the spoken forms differ per language, so there is nothing safe to guess.
     /// `none` serves the text as written, which the model reads less well.
-    /// Without it, every session must name its language in `setup`. A session's own `lang`
-    /// overrides it.
-    #[arg(long)]
+    /// With `--multilang` it is optional: the default for sessions that send no `lang`, which
+    /// otherwise must name theirs. Without `--multilang` a session's `lang` must equal it.
+    #[arg(long, required_unless_present = "multilang")]
     lang: Option<String>,
 
-    /// Serve the catalog's voices of every language, not only those in --lang, so sessions can
-    /// pick different languages through `setup`'s `lang`.
+    /// Let sessions pick their language through `setup`'s `lang`, and serve the catalog's voices
+    /// of every language, not only those in --lang.
     #[arg(long)]
     multilang: bool,
 
@@ -204,5 +204,15 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn lang_is_required_unless_multilang() {
+        assert!(Args::try_parse_from(["server", "--model", "model"]).is_err());
+        assert!(Args::try_parse_from(["server", "--model", "model", "--multilang"]).is_ok());
+        let args =
+            Args::try_parse_from(["server", "--model", "model", "--multilang", "--lang", "pt"])
+                .unwrap();
+        assert_eq!(args.lang.as_deref(), Some("pt"));
     }
 }

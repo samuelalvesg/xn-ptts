@@ -205,20 +205,44 @@ mod language_per_session {
     use std::collections::HashMap;
 
     #[test]
-    fn the_session_language_wins_over_the_server_default() {
+    fn the_session_language_wins_over_the_server_default_with_multilang() {
         let en = Some(Normalize::for_lang(Lang::En));
-        let pt = session_normalize(Some("pt"), en, Rules::DEFAULT).unwrap();
-        assert_eq!(pt.as_str(), "pt");
-        assert_eq!(session_normalize(None, en, Rules::DEFAULT).unwrap().as_str(), "en");
-        assert_eq!(session_normalize(Some(""), en, Rules::DEFAULT).unwrap().as_str(), "en");
-        assert_eq!(session_normalize(Some("none"), en, Rules::DEFAULT).unwrap().as_str(), "none");
+        let norm = |lang, default| session_normalize(lang, default, Rules::DEFAULT, true);
+        assert_eq!(norm(Some("pt"), en).unwrap().as_str(), "pt");
+        assert_eq!(norm(None, en).unwrap().as_str(), "en");
+        assert_eq!(norm(Some(""), en).unwrap().as_str(), "en");
+    }
+
+    #[test]
+    fn without_multilang_only_the_servers_language_is_accepted() {
+        let en = Some(Normalize::for_lang(Lang::En));
+        let norm = |lang| session_normalize(lang, en, Rules::DEFAULT, false);
+        assert_eq!(norm(Some("en")).unwrap().as_str(), "en");
+        assert_eq!(norm(None).unwrap().as_str(), "en");
+        let message = norm(Some("pt")).unwrap_err();
+        assert!(message.contains("'en'") && message.contains("--multilang"), "{message}");
+    }
+
+    #[test]
+    fn a_session_cannot_switch_normalization_off() {
+        let en = Some(Normalize::for_lang(Lang::En));
+        for multilang in [false, true] {
+            for lang in ["none", "off", " Off "] {
+                let message =
+                    session_normalize(Some(lang), en, Rules::DEFAULT, multilang).unwrap_err();
+                assert!(message.contains("not accepted"), "{lang}: {message}");
+            }
+        }
+        // A server started with --lang none still serves unnormalized text to sessions with no lang.
+        let off = Some(Normalize::OFF);
+        assert_eq!(session_normalize(None, off, Rules::DEFAULT, false).unwrap(), Normalize::OFF);
     }
 
     #[test]
     fn no_language_anywhere_is_an_error_that_says_what_to_send() {
-        let message = session_normalize(None, None, Rules::DEFAULT).unwrap_err();
+        let message = session_normalize(None, None, Rules::DEFAULT, true).unwrap_err();
         assert!(message.contains("lang") && message.contains("--lang"), "{message}");
-        assert!(session_normalize(Some("xx"), None, Rules::DEFAULT).is_err());
+        assert!(session_normalize(Some("xx"), None, Rules::DEFAULT, true).is_err());
     }
 
     #[test]

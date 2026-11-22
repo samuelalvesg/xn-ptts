@@ -53,6 +53,8 @@ pub enum TtsReply {
 pub mod error_codes {
     pub const BAD_REQUEST: u32 = 400;
     pub const NOT_FOUND: u32 = 404;
+    /// The voice exists but belongs to another language than the session's.
+    pub const VOICE_LANGUAGE_MISMATCH: u32 = 422;
     pub const TIMEOUT: u32 = 408;
     pub const INTERNAL: u32 = 500;
     pub const NOT_IMPLEMENTED: u32 = 501;

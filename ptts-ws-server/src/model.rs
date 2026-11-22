@@ -29,6 +29,8 @@ pub struct Inner {
     /// What a session that sends no `lang` is normalized as; `None` makes `lang` mandatory.
     pub default_lang: Option<Normalize>,
     pub rules: Rules,
+    /// Whether sessions may choose a language other than `default_lang`.
+    pub multilang: bool,
     pub max_seq_len: usize,
     pub seed_base: u64,
     pub sample_rate: u32,
@@ -106,7 +108,7 @@ pub async fn load_ptts(
     max_seq_len: usize,
     normalize: Option<Normalize>,
     rules: Rules,
-    all_languages: bool,
+    multilang: bool,
     conditions: &[(String, String)],
     max_concurrent_requests: std::num::NonZeroUsize,
 ) -> Result<AppState> {
@@ -116,11 +118,15 @@ pub async fn load_ptts(
         tokio::sync::Semaphore::MAX_PERMITS
     );
     quant.check_device(device)?;
+    anyhow::ensure!(
+        multilang || normalize.is_some(),
+        "--lang is required unless --multilang is set"
+    );
     let default_lang = normalize.map(|n| n.with_rules(rules));
     let synth_normalize = default_lang.unwrap_or(Normalize::OFF);
     // Which catalog voices to register: all of them when sessions choose their language.
     let catalog_lang = match default_lang {
-        Some(n) if !all_languages => n.as_str(),
+        Some(n) if !multilang => n.as_str(),
         _ => "none",
     };
     let (m, model_name) = locate(model, quant).await?;
@@ -188,6 +194,7 @@ pub async fn load_ptts(
         voice_langs,
         default_lang,
         rules,
+        multilang,
         max_seq_len,
         seed_base,
         sample_rate,

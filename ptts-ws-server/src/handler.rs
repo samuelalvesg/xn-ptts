@@ -279,20 +279,33 @@ async fn flush_buffer(
 }
 
 /// The normalization a session runs with: its own `lang`, else the server's. Neither is an
-/// error, since guessing a language reads worse than refusing.
+/// error, since guessing a language reads worse than refusing. A session may not switch the
+/// normalization off, and without `--multilang` it may only name the server's own language.
 fn session_normalize(
     requested: Option<&str>,
     default: Option<Normalize>,
     rules: Rules,
+    multilang: bool,
 ) -> std::result::Result<Normalize, String> {
-    match requested.filter(|l| !l.is_empty()) {
-        Some(lang) => {
-            lang.parse::<Normalize>().map(|n| n.with_rules(rules)).map_err(|e| e.to_string())
-        }
-        None => default.ok_or_else(|| {
+    let Some(lang) = requested.filter(|l| !l.is_empty()) else {
+        return default.ok_or_else(|| {
             "no language: send `lang` in setup, or start the server with --lang".to_string()
-        }),
+        });
+    };
+    let parsed = lang.parse::<Normalize>().map_err(|e| e.to_string())?;
+    if parsed == Normalize::OFF {
+        return Err(format!(
+            "lang '{lang}' is not accepted in setup: name a language, or omit `lang`"
+        ));
     }
+    if !multilang && default.is_some_and(|d| d.as_str() != parsed.as_str()) {
+        let served = default.map_or("none", |d| d.as_str());
+        return Err(format!(
+            "this server serves only '{served}' (started without --multilang); setup asked for '{}'",
+            parsed.as_str()
+        ));
+    }
+    Ok(parsed.with_rules(rules))
 }
 
 /// Whether `voice` can speak `normalize`'s language. Voices with no declared language, such as
@@ -324,13 +337,14 @@ async fn handle_setup(
         .await?;
         return Ok(None);
     }
-    let normalize = match session_normalize(lang.as_deref(), app.default_lang, app.rules) {
-        Ok(n) => n,
-        Err(message) => {
-            send_error(reply_tx, error_codes::BAD_REQUEST, message).await?;
-            return Ok(None);
-        }
-    };
+    let normalize =
+        match session_normalize(lang.as_deref(), app.default_lang, app.rules, app.multilang) {
+            Ok(n) => n,
+            Err(message) => {
+                send_error(reply_tx, error_codes::BAD_REQUEST, message).await?;
+                return Ok(None);
+            }
+        };
     let format = match output_format.parse::<Format>() {
         Ok(f) => f,
         Err(e) => {
@@ -357,13 +371,16 @@ async fn handle_setup(
         .unwrap_or(&app.default_voice);
     let voice_name =
         if voice_name == "default" { &app.default_voice } else { voice_name }.to_string();
-    if !app.voices.contains(&voice_name)
-        || !voice_fits_lang(&app.voice_langs, &voice_name, normalize)
-    {
+    if !app.voices.contains(&voice_name) {
+        send_error(reply_tx, error_codes::NOT_FOUND, format!("unknown voice '{voice_name}'"))
+            .await?;
+        return Ok(None);
+    }
+    if !voice_fits_lang(&app.voice_langs, &voice_name, normalize) {
         send_error(
             reply_tx,
-            error_codes::NOT_FOUND,
-            format!("unknown voice '{voice_name}' for language '{}'", normalize.as_str()),
+            error_codes::VOICE_LANGUAGE_MISMATCH,
+            format!("voice '{voice_name}' does not speak language '{}'", normalize.as_str()),
         )
         .await?;
         return Ok(None);

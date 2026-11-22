@@ -232,12 +232,23 @@ mod language_per_session {
     }
 
     async fn setup_and_speak(app: &AppState, lang: Option<&str>, text: &str) -> Vec<u8> {
+        speak_as(app, lang, None, text).await.unwrap()
+    }
+
+    async fn speak_as(
+        app: &AppState,
+        lang: Option<&str>,
+        voice: Option<&str>,
+        text: &str,
+    ) -> Result<Vec<u8>, String> {
         let (req_tx, mut req_rx) = mpsc::channel(REQUEST_QUEUE);
         let (reply_tx, mut reply_rx) = mpsc::channel(256);
         let (_cancel_tx, mut cancel_rx) = watch::channel(false);
         let lang = lang.map_or("null".to_string(), |l| format!("\"{l}\""));
         let msgs = [
-            format!(r#"{{"type":"setup","output_format":"pcm","lang":{lang}}}"#),
+            serde_json::json!({"type": "setup", "output_format": "pcm", "voice": voice})
+                .to_string()
+                .replacen('}', &format!(r#","lang":{lang}}}"#), 1),
             serde_json::json!({"type": "text", "text": text}).to_string(),
             r#"{"type":"end_of_stream"}"#.to_string(),
         ];
@@ -257,12 +268,12 @@ mod language_per_session {
                     use base64::Engine;
                     pcm.extend(base64::engine::general_purpose::STANDARD.decode(audio).unwrap());
                 }
-                TtsReply::Error { message, .. } => panic!("{message}"),
+                TtsReply::Error { message, .. } => return Err(message),
                 _ => {}
             }
         }
         run.await.unwrap().unwrap();
-        pcm
+        Ok(pcm)
     }
 
     /// Mono s16le at `rate` as a WAV file.
@@ -321,5 +332,49 @@ mod language_per_session {
                 std::fs::write(file, wav(&pcm, app.sample_rate)).unwrap();
             }
         }
+    }
+
+    /// Catalog voices speak with their own accent; `lang` only picks the reading rules.
+    #[tokio::test]
+    #[ignore = "requires PTTS_TEST_MODEL and the Hub voice catalog"]
+    async fn catalog_voices_of_each_language_in_one_instance() {
+        let model = std::env::var("PTTS_TEST_MODEL").expect("set PTTS_TEST_MODEL");
+        let app = load_ptts(
+            &model,
+            None,
+            Some(ptts::voice_catalog::DEFAULT_VOICE_CATALOG),
+            ptts::synth::DeviceKind::Cpu,
+            ptts::synth::Quant::Q80,
+            0.3,
+            7,
+            1024,
+            None,
+            Rules::DEFAULT,
+            true,
+            &[],
+            std::num::NonZeroUsize::new(2).unwrap(),
+        )
+        .await
+        .unwrap();
+        let pt = "Temos R$ 10,50 e a Dra. Ana, em 2 de março, às 15h.";
+        let en = "We have $10.50 and Dr. Smith, on March 2nd at 3pm.";
+        let cases = [
+            ("Débora", "pt", pt),
+            ("Davi", "pt", pt),
+            ("Manuela-Lu", "pt", pt),
+            ("Easton", "en", en),
+        ];
+        for (voice, lang, text) in cases {
+            let pcm = speak_as(&app, Some(lang), Some(voice), text).await.unwrap();
+            assert!(!pcm.is_empty(), "{voice}");
+            if let Ok(dir) = std::env::var("PTTS_TEST_WAV_DIR") {
+                std::fs::create_dir_all(&dir).unwrap();
+                let name = voice.to_lowercase();
+                std::fs::write(format!("{dir}/{name}-{lang}.wav"), wav(&pcm, app.sample_rate))
+                    .unwrap();
+            }
+        }
+        let refused = speak_as(&app, Some("en"), Some("Débora"), en).await.unwrap_err();
+        assert!(refused.contains("unknown voice"), "{refused}");
     }
 }

@@ -67,8 +67,15 @@ struct Args {
     /// `ar`, `hi`, `ko`, `pl`, `sv`, `fi`, `no`, `it`, `nl` or `ja`. Required:
     /// the spoken forms differ per language, so there is nothing safe to guess.
     /// `none` serves the text as written, which the model reads less well.
+    /// Without it, every session must name its language in `setup`. A session's own `lang`
+    /// overrides it.
     #[arg(long)]
-    lang: String,
+    lang: Option<String>,
+
+    /// Serve the catalog's voices of every language, not only those in --lang, so sessions can
+    /// pick different languages through `setup`'s `lang`.
+    #[arg(long)]
+    multilang: bool,
 
     /// Which word rewrites run on the normalized text: `default` (numbers, currency,
     /// dashed-digits, codes, emails, urls, abbreviations, elongations, local-dates), `all` (those and phones,
@@ -140,7 +147,8 @@ async fn build_app_state(args: &Args) -> Result<model::AppState> {
     // Device and weight-format checks run before downloading: `SynthBuilder`
     // would catch them, but only after the checkpoint is on disk.
     quant.check_device(device)?;
-    let normalize = args.lang.parse::<Normalize>()?.with_rules(args.rewrites.parse::<Rules>()?);
+    let rules = args.rewrites.parse::<Rules>()?;
+    let normalize = args.lang.as_deref().map(str::parse::<Normalize>).transpose()?;
     let mut conditions = Vec::new();
     for condition in &args.conditions {
         let (name, value) = condition.split_once('=').context("--condition takes NAME=VALUE")?;
@@ -156,6 +164,8 @@ async fn build_app_state(args: &Args) -> Result<model::AppState> {
         args.seed,
         args.max_seq_len,
         normalize,
+        rules,
+        args.multilang,
         &conditions,
         args.max_concurrent_requests,
     )

@@ -268,11 +268,13 @@ mod language_per_session {
         let (req_tx, mut req_rx) = mpsc::channel(REQUEST_QUEUE);
         let (reply_tx, mut reply_rx) = mpsc::channel(256);
         let (_cancel_tx, mut cancel_rx) = watch::channel(false);
-        let lang = lang.map_or("null".to_string(), |l| format!("\"{l}\""));
+        let mut setup =
+            serde_json::json!({"type": "setup", "output_format": "pcm", "voice": voice});
+        if let Some(lang) = lang {
+            setup["lang"] = lang.into();
+        }
         let msgs = [
-            serde_json::json!({"type": "setup", "output_format": "pcm", "voice": voice})
-                .to_string()
-                .replacen('}', &format!(r#","lang":{lang}}}"#), 1),
+            setup.to_string(),
             serde_json::json!({"type": "text", "text": text}).to_string(),
             r#"{"type":"end_of_stream"}"#.to_string(),
         ];
@@ -409,5 +411,44 @@ mod language_per_session {
         assert!(message.contains("does not speak"), "{message}");
         let (code, _) = speak_as(&app, Some("en"), Some("NoSuchVoice"), en).await.unwrap_err();
         assert_eq!(code, error_codes::NOT_FOUND);
+    }
+
+    /// FNV-1a: stable across Rust versions, unlike `DefaultHasher`.
+    fn fnv1a(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf29ce484222325, |h, b| (h ^ *b as u64).wrapping_mul(0x100000001b3))
+    }
+
+    /// Hash of the PCM that upstream `c81eca4` produced for `AUDIO_REGRESSION_TEXT`: fixed seed,
+    /// default voice, `--lang en`, q8, CPU, no `lang` in setup. A server started with `--lang X`
+    /// must keep producing it. Regenerate only from upstream: see `docs/multilang-audio-hash.md`.
+    const UPSTREAM_PCM_HASH: u64 = 0x12d7e2d3cfa715c1;
+    const AUDIO_REGRESSION_TEXT: &str = "We have $10.50 and Dr. Smith, on March 2nd at 3pm.";
+
+    #[tokio::test]
+    #[ignore = "requires PTTS_TEST_MODEL: hf://gradium/phonon-40m-multilingual, q8, CPU"]
+    async fn the_default_path_still_produces_the_upstream_audio() {
+        let model = std::env::var("PTTS_TEST_MODEL").expect("set PTTS_TEST_MODEL");
+        let app = load_ptts(
+            &model,
+            None,
+            None,
+            ptts::synth::DeviceKind::Cpu,
+            ptts::synth::Quant::Q80,
+            0.3,
+            7,
+            1024,
+            Some("en".parse().unwrap()),
+            Rules::DEFAULT,
+            false,
+            &[],
+            std::num::NonZeroUsize::new(1).unwrap(),
+        )
+        .await
+        .unwrap();
+        let pcm = setup_and_speak(&app, None, AUDIO_REGRESSION_TEXT).await;
+        assert!(!pcm.is_empty());
+        let hash = fnv1a(&pcm);
+        eprintln!("pcm bytes {} fnv1a {hash:#018x}", pcm.len());
+        assert_eq!(hash, UPSTREAM_PCM_HASH, "audio differs from upstream c81eca4");
     }
 }

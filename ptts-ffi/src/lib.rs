@@ -287,3 +287,59 @@ mod tests {
         assert!(check_temperature(f32::INFINITY).is_err());
     }
 }
+
+#[cfg(test)]
+mod audio_regression {
+    use super::*;
+    use std::ffi::CString;
+
+    /// FNV-1a over the f32 samples' little-endian bytes: stable across Rust versions.
+    fn fnv1a(samples: &[f32]) -> u64 {
+        samples
+            .iter()
+            .flat_map(|s| s.to_le_bytes())
+            .fold(0xcbf29ce484222325, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+    }
+
+    extern "C" fn collect(pcm: *const f32, n: usize, user: *mut c_void) -> bool {
+        // SAFETY: `ptts_speak` hands `n` valid samples, and `user` is the `Vec` the test passed.
+        unsafe { (*(user as *mut Vec<f32>)).extend_from_slice(std::slice::from_raw_parts(pcm, n)) };
+        true
+    }
+
+    /// Hash of what upstream `c81eca4` produced for the same call: see `docs/multilang-audio-hash.md`.
+    ///
+    /// The CPU engine is not bit-stable even upstream: in 8 runs of `c81eca4`, one produced another
+    /// hash. The test therefore passes if any of `ATTEMPTS` runs matches the modal upstream hash.
+    const UPSTREAM_SAMPLES_HASH: u64 = 0x230f1b8ea3d36faf;
+    const ATTEMPTS: usize = 5;
+
+    #[test]
+    #[ignore = "requires PTTS_TEST_MODEL_DIR: a local phonon-40m-multilingual folder (q8 GGUF)"]
+    fn the_cpu_engine_still_produces_the_upstream_audio() {
+        let dir = CString::new(std::env::var("PTTS_TEST_MODEL_DIR").unwrap()).unwrap();
+        let lang = CString::new("en").unwrap();
+        let text = CString::new("We have $10.50 and Dr. Smith, on March 2nd at 3pm.").unwrap();
+        let mut out = std::mem::MaybeUninit::<PttsResult>::uninit();
+        let mut hashes = Vec::new();
+        // SAFETY: the C strings outlive the calls, `h` comes from `ptts_new` and is freed once,
+        // and `samples` outlives each `ptts_speak`.
+        unsafe {
+            let h = ptts_new(dir.as_ptr(), PTTS_UNIT_CPU, lang.as_ptr());
+            assert!(!h.is_null());
+            for _ in 0..ATTEMPTS {
+                let mut samples: Vec<f32> = Vec::new();
+                ptts_set_seed(h, 7);
+                let user = &mut samples as *mut Vec<f32> as *mut c_void;
+                assert!(ptts_speak(h, text.as_ptr(), collect, user, out.as_mut_ptr()));
+                assert_eq!(samples.len(), 134400, "length differs from upstream");
+                hashes.push(fnv1a(&samples));
+                if hashes.last() == Some(&UPSTREAM_SAMPLES_HASH) {
+                    break;
+                }
+            }
+            ptts_free(h);
+        }
+        assert!(hashes.contains(&UPSTREAM_SAMPLES_HASH), "hashes {hashes:x?}");
+    }
+}

@@ -12,7 +12,7 @@ to be unchanged by the multilingual work.
 
 ## Determinism
 
-- ws-server, `phonon-40m-multilingual`: 27 of 28 runs on this machine gave the hash above (six
+- ws-server, `phonon-40m-multilingual`: 23 of 24 runs on this machine gave the hash above (six
   earlier runs, five and twelve later ones, plus upstream `c81eca4` once); one run gave
   `0xd5d18773e242262a`, cause not found. A hard failure of the exact comparison is possible.
 - ws-server, `phonon-31m-en` (seed 7, temperature 0.3, `--lang en`, q8, CPU, same text): upstream

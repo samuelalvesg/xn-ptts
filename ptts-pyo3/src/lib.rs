@@ -418,15 +418,20 @@ impl Tts {
         seed: Option<u64>,
         cfg_coef: Option<f32>,
     ) -> SpeechOptions {
-        SpeechOptions {
-            voice: voice.or_else(|| self.default_voice.clone()),
-            temperature,
-            seed,
-            cfg_coef,
-            max_tokens_per_chunk: None,
-            post_process: None,
-            normalize: None,
+        let mut opts = SpeechOptions::default();
+        if let Some(voice) = voice.or_else(|| self.default_voice.clone()) {
+            opts = opts.voice(voice);
         }
+        if let Some(temperature) = temperature {
+            opts = opts.temperature(temperature);
+        }
+        if let Some(seed) = seed {
+            opts = opts.seed(seed);
+        }
+        if let Some(cfg_coef) = cfg_coef {
+            opts = opts.cfg_coef(cfg_coef);
+        }
+        opts
     }
 
     /// Start a generation with the lock taken *inside* `py.detach`. Holding it

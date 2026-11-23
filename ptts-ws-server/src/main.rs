@@ -64,8 +64,8 @@ struct Args {
     quant: Option<String>,
 
     /// Language incoming text is normalized as before tokenizing: `en`, `fr`, `de`, `es`, `pt`,
-    /// `ar`, `hi`, `ko`, `pl`, `sv`, `fi`, `no`, `it`, `nl` or `ja`. Required
-    /// without `--multilang`: the spoken forms differ per language, so there is nothing safe to guess.
+    /// `ar`, `hi`, `ko`, `pl`, `sv`, `fi`, `no`, `it`, `nl` or `ja`. Required without
+    /// `--multilang`: the spoken forms differ per language, so there is nothing safe to guess.
     /// `none` serves the text as written, which the model reads less well.
     /// With `--multilang` it is optional: the default for sessions that send no `lang`, which
     /// otherwise must name theirs. Without `--multilang` a session's `lang` must equal it.

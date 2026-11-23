@@ -4,7 +4,7 @@ use crate::protocol::{TtsReply, TtsRequest, error_codes};
 use anyhow::Result;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use ptts::preprocess::{Normalize, Rules};
+use ptts::preprocess::{Lang, Normalize, Rules};
 use ptts::synth::{Session, SpeechOptions};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
@@ -278,9 +278,10 @@ async fn flush_buffer(
     Ok(())
 }
 
-/// The normalization a session runs with: its own `lang`, else the server's. Neither is an
-/// error, since guessing a language reads worse than refusing. A session may not switch the
-/// normalization off unless the server already runs with it off, and without `--multilang` it may only name the server's own language.
+/// The normalization a session runs with: its own `lang`, else the server's. With neither it is
+/// an error, since guessing a language reads worse than refusing. A session may not switch the
+/// normalization off unless the server already runs with it off, and without `--multilang` it
+/// may only name the server's own language.
 fn session_normalize(
     requested: Option<&str>,
     default: Option<Normalize>,
@@ -292,7 +293,10 @@ fn session_normalize(
             "no language: send `lang` in setup, or start the server with --lang".to_string()
         });
     };
-    let parsed = lang.parse::<Normalize>().map_err(|e| e.to_string())?;
+    let parsed = lang.parse::<Normalize>().map_err(|_| {
+        let accepted = Lang::ALL.iter().map(|l| l.as_str()).collect::<Vec<_>>().join(", ");
+        format!("unsupported lang '{lang}' in setup: expected one of {accepted}")
+    })?;
     if parsed == Normalize::OFF {
         // A server started with `--lang none` serves exactly this, so naming it is not a switch.
         if default == Some(Normalize::OFF) {

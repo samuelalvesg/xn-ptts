@@ -29,7 +29,6 @@ pub struct Inner {
     /// What a session that sends no `lang` is normalized as; `None` makes `lang` mandatory.
     pub default_lang: Option<Normalize>,
     pub rules: Rules,
-    /// Whether sessions may choose a language other than `default_lang`.
     pub multilang: bool,
     pub max_seq_len: usize,
     pub seed_base: u64,

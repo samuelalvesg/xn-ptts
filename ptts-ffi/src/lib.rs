@@ -307,7 +307,7 @@ mod audio_regression {
         true
     }
 
-    /// Hash of what upstream `c81eca4` produced for the same call: see `docs/multilang-audio-hash.md`.
+    /// Upstream `c81eca4` hash: see `docs/multilang-audio-hash.md`.
     ///
     /// The CPU engine is not bit-stable even upstream: in 8 runs of `c81eca4`, one produced another
     /// hash. The test therefore passes if any of `ATTEMPTS` runs matches the modal upstream hash.

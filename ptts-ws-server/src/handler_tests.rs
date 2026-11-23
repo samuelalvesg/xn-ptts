@@ -247,7 +247,20 @@ mod language_per_session {
     fn no_language_anywhere_is_an_error_that_says_what_to_send() {
         let message = session_normalize(None, None, Rules::DEFAULT, true).unwrap_err();
         assert!(message.contains("lang") && message.contains("--lang"), "{message}");
-        assert!(session_normalize(Some("xx"), None, Rules::DEFAULT, true).is_err());
+        let message = session_normalize(Some("xx"), None, Rules::DEFAULT, true).unwrap_err();
+        assert!(message.contains("'xx'"), "{message}");
+        for code in ["en", "fr", "de", "es", "pt", "ja"] {
+            assert!(message.contains(code), "{code} missing: {message}");
+        }
+        assert!(!message.contains("none"), "{message}");
+    }
+
+    #[test]
+    fn an_invalid_lang_in_setup_lists_the_accepted_languages() {
+        let en = Some(Normalize::for_lang(Lang::En));
+        let message = session_normalize(Some("xx"), en, Rules::DEFAULT, false).unwrap_err();
+        assert!(message.contains("'xx'") && message.contains("pt"), "{message}");
+        assert!(!message.contains("none"), "{message}");
     }
 
     #[test]

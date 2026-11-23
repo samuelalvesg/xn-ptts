@@ -104,12 +104,16 @@ impl Engine {
         sink: &mut dyn FnMut(&[f32]) -> bool,
     ) -> Result<PttsResult, String> {
         let start = std::time::Instant::now();
-        let opts = SpeechOptions {
-            voice: self.voice.clone(),
-            temperature: self.temperature,
-            seed: self.seed,
-            ..Default::default()
-        };
+        let mut opts = SpeechOptions::default();
+        if let Some(voice) = self.voice.clone() {
+            opts = opts.voice(voice);
+        }
+        if let Some(temperature) = self.temperature {
+            opts = opts.temperature(temperature);
+        }
+        if let Some(seed) = self.seed {
+            opts = opts.seed(seed);
+        }
         let text = self.normalize.apply(text);
         let stream = self.synth.stream_with(&text, &opts).map_err(|e| e.to_string())?;
         let (mut samples, mut ttfa) = (0, None);

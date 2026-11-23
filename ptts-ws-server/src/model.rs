@@ -67,7 +67,12 @@ async fn locate(model: &str, quant: Quant) -> Result<(Checkpoint, String)> {
     Ok((checkpoint, name))
 }
 
-type CatalogVoice = (String, std::path::PathBuf, Option<String>);
+struct CatalogVoice {
+    name: String,
+    path: std::path::PathBuf,
+    /// The language the catalog gives the voice, if any.
+    language: Option<String>,
+}
 
 /// The voices of the catalog `source` names, each downloaded on first use: those in `lang` and
 /// those with no language, or all of them when `lang` is `none`. A voice that cannot be fetched
@@ -83,7 +88,11 @@ async fn catalog_voices(source: &str, lang: &str) -> Result<Vec<CatalogVoice>> {
                 continue;
             }
             match catalog.fetch(voice) {
-                Ok(path) => voices.push((voice.name.clone(), path, voice.language.clone())),
+                Ok(path) => voices.push(CatalogVoice {
+                    name: voice.name.clone(),
+                    path,
+                    language: voice.language.clone(),
+                }),
                 Err(e) => {
                     tracing::warn!(voice = %voice.name, error = %e, "failed to fetch catalog voice")
                 }
@@ -142,7 +151,7 @@ pub async fn load_ptts(
     if let Some(catalog) = voice_catalog {
         match catalog_voices(catalog, catalog_lang).await {
             Ok(voices) => {
-                for (name, path, language) in voices {
+                for CatalogVoice { name, path, language } in voices {
                     if let Some(language) = language {
                         voice_langs.insert(name.clone(), language);
                     }
@@ -219,14 +228,15 @@ mod tests {
         .unwrap();
         let source = dir.to_str().unwrap();
         let names = |voices: Vec<CatalogVoice>| -> Vec<String> {
-            voices.into_iter().map(|(name, ..)| name).collect()
+            voices.into_iter().map(|v| v.name).collect()
         };
         assert_eq!(names(catalog_voices(source, "en").await.unwrap()), ["Zoey", "Mine"]);
         assert_eq!(
             names(catalog_voices(source, "none").await.unwrap()),
             ["Zoey", "Annika", "Mine"]
         );
-        let (_, path, language) = catalog_voices(source, "de").await.unwrap().remove(0);
+        let CatalogVoice { path, language, .. } =
+            catalog_voices(source, "de").await.unwrap().remove(0);
         assert_eq!(language.as_deref(), Some("de"));
         assert_eq!(path, dir.join("voices/b.safetensors"));
         assert!(catalog_voices(dir.join("missing").to_str().unwrap(), "en").await.is_err());

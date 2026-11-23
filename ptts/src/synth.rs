@@ -231,6 +231,7 @@ impl std::str::FromStr for Quant {
 /// Per-request overrides. Anything left `None` falls back to what the
 /// [`SynthBuilder`] was configured with.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct SpeechOptions {
     pub voice: Option<String>,
     pub temperature: Option<f32>,

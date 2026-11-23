@@ -236,6 +236,11 @@ mod language_per_session {
         // A server started with --lang none still serves unnormalized text to sessions with no lang.
         let off = Some(Normalize::OFF);
         assert_eq!(session_normalize(None, off, Rules::DEFAULT, false).unwrap(), Normalize::OFF);
+        // Naming `none` there is the same as naming nothing.
+        for multilang in [false, true] {
+            let same = session_normalize(Some("none"), off, Rules::DEFAULT, multilang);
+            assert_eq!(same.unwrap(), Normalize::OFF);
+        }
     }
 
     #[test]
@@ -302,7 +307,6 @@ mod language_per_session {
         Ok(pcm)
     }
 
-    /// Mono s16le at `rate` as a WAV file.
     fn wav(pcm: &[u8], rate: u32) -> Vec<u8> {
         let mut out = Vec::with_capacity(44 + pcm.len());
         out.extend(b"RIFF");
@@ -319,7 +323,6 @@ mod language_per_session {
         out
     }
 
-    /// One instance, one set of weights, two simultaneous connections in different languages.
     #[tokio::test]
     #[ignore = "requires PTTS_TEST_MODEL: a multilingual checkpoint folder or hf:// repo"]
     async fn one_instance_serves_two_languages() {
@@ -347,7 +350,6 @@ mod language_per_session {
             ("pt2", "pt", "We have $10.50 and Dr. Smith, on March 2nd at 3pm."),
             ("en2", "en", "Temos R$ 10,50 e a Dra. Ana, em 2 de março, às 15h."),
         ];
-        // Two connections at once, as the instance serves them: each pair runs concurrently.
         for pair in cases.chunks(2) {
             let app = &app;
             let runs = pair.iter().map(|&(name, lang, text)| async move {
@@ -355,7 +357,6 @@ mod language_per_session {
             });
             for (name, lang, pcm) in futures_util::future::join_all(runs).await {
                 assert!(!pcm.is_empty(), "{name}");
-                // Not silence.
                 assert!(pcm.as_chunks::<2>().0.iter().any(|b| i16::from_le_bytes(*b).abs() > 300));
                 if let Ok(dir) = std::env::var("PTTS_TEST_WAV_DIR") {
                     std::fs::create_dir_all(&dir).unwrap();

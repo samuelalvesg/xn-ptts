@@ -280,7 +280,7 @@ async fn flush_buffer(
 
 /// The normalization a session runs with: its own `lang`, else the server's. Neither is an
 /// error, since guessing a language reads worse than refusing. A session may not switch the
-/// normalization off, and without `--multilang` it may only name the server's own language.
+/// normalization off unless the server already runs with it off, and without `--multilang` it may only name the server's own language.
 fn session_normalize(
     requested: Option<&str>,
     default: Option<Normalize>,
@@ -294,6 +294,10 @@ fn session_normalize(
     };
     let parsed = lang.parse::<Normalize>().map_err(|e| e.to_string())?;
     if parsed == Normalize::OFF {
+        // A server started with `--lang none` serves exactly this, so naming it is not a switch.
+        if default == Some(Normalize::OFF) {
+            return Ok(Normalize::OFF);
+        }
         return Err(format!(
             "lang '{lang}' is not accepted in setup: name a language, or omit `lang`"
         ));
@@ -345,6 +349,9 @@ async fn handle_setup(
                 return Ok(None);
             }
         };
+    if let Some(warning) = normalize.language_warning(app.synth.languages()) {
+        tracing::warn!("{warning}");
+    }
     let format = match output_format.parse::<Format>() {
         Ok(f) => f,
         Err(e) => {

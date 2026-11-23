@@ -12,10 +12,17 @@ to be unchanged by the multilingual work.
 
 ## Determinism
 
-- ws-server: deterministic. Six consecutive runs of the test on this branch (one plus five
-  repeats, same machine) gave the same hash every time, so the test has no tolerance.
+- ws-server, `phonon-40m-multilingual`: 27 of 28 runs on this machine gave the hash above (six
+  earlier runs, five and twelve later ones, plus upstream `c81eca4` once); one run gave
+  `0xd5d18773e242262a`, cause not found. A hard failure of the exact comparison is possible.
+- ws-server, `phonon-31m-en` (seed 7, temperature 0.3, `--lang en`, q8, CPU, same text): upstream
+  `c81eca4` gives `0xa2005e12605cc91a` (10 runs, identical bytes) and this branch gives the same
+  hash and the same bytes in 10 runs. Debug test profile, about 13 to 15 s per run after the
+  model is cached.
 - FFI: not deterministic on the CPU, even upstream. In 8 runs of `c81eca4`, one produced a
-  different hash. The test passes if any of 5 attempts matches the modal upstream hash.
+  different hash. On this branch, 5 runs of the test needed 1, 2, 3, 5 and 1 attempts to match
+  (one run matched only on the last attempt), so 5 attempts is the margin, not a comfortable one.
+  The test passes if any of 5 attempts matches the modal upstream hash.
 
 ## Regenerating
 

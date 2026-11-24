@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>One server, one language per session</title>
+<style>
+  :root { color-scheme: light dark; --bg:#fafafa; --fg:#1d1d1f; --card:#fff; --line:#d8d8de; --accent:#2457d6; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#16161a; --fg:#ececf1; --card:#1f1f25; --line:#3a3a44; --accent:#7aa2ff; } }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui, sans-serif; }
+  main { max-width:720px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:1.35rem; margin:0 0 4px; }
+  p.sub { margin:0 0 20px; opacity:.75; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
+  label { display:block; font-size:.85rem; opacity:.8; margin:10px 0 4px; }
+  select, textarea, button { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+  select, textarea { width:100%; box-sizing:border-box; }
+  textarea { min-height:84px; resize:vertical; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; }
+  .row > div { flex:1 1 200px; }
+  button { cursor:pointer; background:var(--accent); color:#fff; border-color:var(--accent); margin:12px 8px 0 0; }
+  button.alt { background:transparent; color:var(--accent); }
+  pre { margin:0; white-space:pre-wrap; font:13px/1.45 ui-monospace, monospace; max-height:240px; overflow:auto; }
+  audio { width:100%; margin-top:8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>One server, one language per session</h1>
+  <p class="sub">Each click opens a session on <code>ptts-ws-server</code> with the chosen <code>lang</code> and voice. The language only changes how the text is read; the voice sets the accent.</p>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <label for="lang">Session language (<code>lang</code>)</label>
+        <select id="lang"></select>
+      </div>
+      <div>
+        <label for="voice">Voice</label>
+        <select id="voice"></select>
+      </div>
+    </div>
+    <label for="text">Text</label>
+    <textarea id="text"></textarea>
+    <button id="speak">Speak</button>
+    <button id="both" class="alt">pt and en at the same time</button>
+    <button id="stop" class="alt">Stop</button>
+    <div id="players"></div>
+  </div>
+
+  <div class="card"><pre id="log">Ready. Pick a language and press Speak.</pre></div>
+</main>
+
+<script>
+const params = new URLSearchParams(location.search);
+const WS_URL = params.get("ws") || `ws://${location.hostname}:8080/speech/tts`;
+const SAMPLES = {
+  pt: "Temos R$ 10,50 e a Dra. Ana, em 2 de março, às 15h.",
+  en: "We have $10.50 and Dr. Smith, on March 2nd at 3pm.",
+  fr: "Nous avons 10,50 € et le Dr Martin, le 2 mars à 15 h.",
+  de: "Wir haben 10,50 € und Dr. Müller, am 2. März um 15 Uhr.",
+  es: "Tenemos 10,50 € y la Dra. Ana, el 2 de marzo a las 15 h.",
+  ja: "合計は10,500円です。",
+  none: "The sum is 10 plus 5, written as 10+5.",
+};
+const LANGS = ["pt", "en", "fr", "de", "es", "ja", "none", "xx"];
+const $ = (id) => document.getElementById(id);
+const logEl = $("log");
+const log = (m) => { logEl.textContent += "\n" + m; logEl.scrollTop = logEl.scrollHeight; };
+let voices = {};
+let ctx = null;
+let sessions = [];
+
+LANGS.forEach((l) => $("lang").append(new Option(l === "xx" ? "xx (invalid: expect a 400)" : l, l)));
+
+function fillVoices() {
+  const lang = $("lang").value;
+  $("voice").replaceChildren(new Option("(the checkpoint's default)", ""));
+  Object.entries(voices).forEach(([voiceLang, names]) => {
+    const group = document.createElement("optgroup");
+    group.label = `${voiceLang} voices`;
+    names.forEach((n) => group.append(new Option(n, n)));
+    $("voice").append(group);
+  });
+  const own = (voices[lang] || [])[0];
+  if (own) $("voice").value = own;
+  $("text").value = SAMPLES[lang] || SAMPLES.en;
+}
+$("lang").addEventListener("change", fillVoices);
+
+fetch("voices.json").then((r) => r.json()).then((v) => { voices = v; $("lang").value = "pt"; fillVoices(); })
+  .catch(() => log("voices.json missing: run `python scripts/e2e-lang/voices_json.py` first"));
+
+function speak(lang, voice, text, label) {
+  ctx = ctx || new AudioContext({ sampleRate: 24000 });
+  ctx.resume();
+  return new Promise((resolve) => {
+    const ws = new WebSocket(WS_URL);
+    const chunks = [];
+    let sampleRate = 24000, playAt = 0, started = false;
+    const t0 = performance.now();
+    sessions.push(ws);
+    ws.onopen = () => {
+      const setup = { type: "setup", output_format: "pcm", lang };
+      if (voice) setup.voice = voice;
+      ws.send(JSON.stringify(setup));
+      log(`[${label}] setup lang=${lang} voice=${voice || "(default)"}`);
+    };
+    ws.onmessage = (ev) => {
+      const m = JSON.parse(ev.data);
+      if (m.type === "ready") {
+        sampleRate = m.sample_rate;
+        ws.send(JSON.stringify({ type: "text", text }));
+        ws.send(JSON.stringify({ type: "end_of_stream" }));
+      } else if (m.type === "audio") {
+        const bin = atob(m.audio);
+        const pcm = new Int16Array(bin.length / 2);
+        for (let i = 0; i < pcm.length; i++) pcm[i] = ((bin.charCodeAt(2 * i + 1) << 8) | bin.charCodeAt(2 * i)) << 16 >> 16;
+        chunks.push(pcm);
+        const buf = ctx.createBuffer(1, pcm.length, sampleRate);
+        const ch = buf.getChannelData(0);
+        for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(ctx.destination);
+        playAt = Math.max(playAt, ctx.currentTime + 0.05);
+        src.start(playAt);
+        playAt += buf.duration;
+        if (!started) { started = true; log(`[${label}] first audio after ${Math.round(performance.now() - t0)} ms`); }
+      } else if (m.type === "error") {
+        log(`[${label}] ERROR ${m.code}: ${m.message}`);
+      } else if (m.type === "end_of_stream") {
+        ws.close();
+      }
+    };
+    ws.onerror = () => log(`[${label}] cannot connect to ${WS_URL} (is the server up? use ?ws=ws://host:port/speech/tts)`);
+    ws.onclose = () => {
+      if (chunks.length) {
+        const total = chunks.reduce((n, c) => n + c.length, 0);
+        const all = new Int16Array(total);
+        let offset = 0;
+        chunks.forEach((c) => { all.set(c, offset); offset += c.length; });
+        const audio = document.createElement("audio");
+        audio.controls = true;
+        audio.src = URL.createObjectURL(toWav(all, sampleRate));
+        const caption = document.createElement("div");
+        caption.textContent = `${label} (${(total / sampleRate).toFixed(1)} s)`;
+        $("players").prepend(audio);
+        $("players").prepend(caption);
+        log(`[${label}] done: ${(total / sampleRate).toFixed(1)} s in ${Math.round(performance.now() - t0)} ms`);
+      }
+      resolve();
+    };
+  });
+}
+
+function toWav(pcm, sampleRate) {
+  const buffer = new ArrayBuffer(44 + pcm.length * 2), view = new DataView(buffer);
+  const write = (offset, s) => [...s].forEach((c, i) => view.setUint8(offset + i, c.charCodeAt(0)));
+  write(0, "RIFF"); view.setUint32(4, 36 + pcm.length * 2, true); write(8, "WAVE"); write(12, "fmt ");
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  write(36, "data"); view.setUint32(40, pcm.length * 2, true);
+  new Int16Array(buffer, 44).set(pcm);
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+$("speak").onclick = () => speak($("lang").value, $("voice").value, $("text").value, `${$("lang").value} session`);
+$("both").onclick = () => {
+  const first = (l) => (voices[l] || [])[0] || "";
+  speak("pt", first("pt"), SAMPLES.pt, "session A (pt)");
+  speak("en", first("en"), SAMPLES.en, "session B (en)");
+};
+$("stop").onclick = () => { sessions.forEach((s) => s.close()); sessions = []; if (ctx) { ctx.close(); ctx = null; } log("stopped"); };
+</script>
+</body>
+</html>
